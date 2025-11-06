@@ -31,7 +31,15 @@ class _DecryptScreenState extends State<DecryptScreen> {
   Future<void> _loadPrivateKeys() async {
     final keys = await _keyStorageService.getAllKeys();
     setState(() {
-      _privateKeys = keys.where((key) => key.isPrivate).toList();
+      // 严格过滤，只显示真正的私钥
+      _privateKeys = keys.where((key) {
+        // 检查密钥内容，确保真的是私钥
+        final content = key.keyContent.toLowerCase();
+        return key.isPrivate && 
+               (content.contains('begin pgp private key block') ||
+                content.contains('begin rsa private key') ||
+                content.contains('begin private key'));
+      }).toList();
       if (_privateKeys.isNotEmpty && _selectedKey == null) {
         _selectedKey = _privateKeys.first;
       }
@@ -79,16 +87,31 @@ class _DecryptScreenState extends State<DecryptScreen> {
       if (mounted) {
         final errorMessage = e.toString();
         // 检查是否是密码错误
-        if (errorMessage.contains('密码') || errorMessage.contains('password')) {
+        if (errorMessage.contains('密码') || errorMessage.contains('password') || errorMessage.contains('密码错误')) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
               content: Text('私钥密码错误，请重新输入'),
               backgroundColor: Colors.red,
             ),
           );
-        } else {
+        } 
+        // 检查是否是公钥被误用
+        else if (errorMessage.contains('公钥') || errorMessage.contains('PGPPublicKeyRing') || errorMessage.contains('PGPSecretKeyRing expected')) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('解密失败: $e')),
+            const SnackBar(
+              content: Text('错误：您选择的是公钥，解密需要使用私钥。请选择正确的私钥。'),
+              backgroundColor: Colors.red,
+              duration: Duration(seconds: 4),
+            ),
+          );
+        }
+        // 其他错误
+        else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('解密失败: ${errorMessage.length > 100 ? errorMessage.substring(0, 100) + "..." : errorMessage}'),
+              duration: const Duration(seconds: 4),
+            ),
           );
         }
       }

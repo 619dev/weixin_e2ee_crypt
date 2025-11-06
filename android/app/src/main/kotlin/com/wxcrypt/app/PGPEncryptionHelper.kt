@@ -369,114 +369,268 @@ object PGPEncryptionHelper {
         try {
             // 清理私钥内容
             val cleanedKey = cleanArmoredKey(privateKeyArmored)
+            android.util.Log.d("PGPEncryptionHelper", "Cleaned private key length: ${cleanedKey.length}")
+            
+            // 验证是否为私钥格式
+            if (!cleanedKey.contains("-----BEGIN PGP PRIVATE KEY BLOCK-----") && 
+                !cleanedKey.contains("-----BEGIN RSA PRIVATE KEY-----") &&
+                !cleanedKey.contains("-----BEGIN PRIVATE KEY-----")) {
+                android.util.Log.e("PGPEncryptionHelper", "Key does not appear to be a private key")
+                throw Exception("提供的密钥不是私钥格式，请选择正确的私钥")
+            }
             
             // 读取私钥
-            val secretKeyRingCollection = PGPSecretKeyRingCollection(
-                PGPUtil.getDecoderStream(ByteArrayInputStream(cleanedKey.toByteArray(Charsets.UTF_8))),
-                JcaKeyFingerprintCalculator()
-            )
+            val secretKeyRingCollection = try {
+                PGPSecretKeyRingCollection(
+                    PGPUtil.getDecoderStream(ByteArrayInputStream(cleanedKey.toByteArray(Charsets.UTF_8))),
+                    JcaKeyFingerprintCalculator()
+                )
+            } catch (e: Exception) {
+                android.util.Log.e("PGPEncryptionHelper", "Failed to parse as secret keyring collection: ${e.message}", e)
+                // 检查是否是公钥被误用
+                if (e.message?.contains("PGPPublicKeyRing") == true || 
+                    e.message?.contains("found where PGPSecretKeyRing expected") == true) {
+                    throw Exception("提供的密钥是公钥而不是私钥，解密需要使用私钥")
+                }
+                throw Exception("无法解析私钥：${e.message}")
+            }
+            
+            android.util.Log.d("PGPEncryptionHelper", "Successfully parsed secret keyring collection")
 
             // 清理加密消息
-            val cleanedMessage = cleanArmoredKey(encryptedMessageArmored)
+            val cleanedMessage = try {
+                cleanArmoredKey(encryptedMessageArmored)
+            } catch (e: Exception) {
+                android.util.Log.e("PGPEncryptionHelper", "Failed to clean encrypted message: ${e.message}", e)
+                throw Exception("清理加密消息失败: ${e.message}")
+            }
+            android.util.Log.d("PGPEncryptionHelper", "Cleaned encrypted message length: ${cleanedMessage.length}")
             
             // 读取加密消息
-            val objectFactory = PGPObjectFactory(
-                PGPUtil.getDecoderStream(ByteArrayInputStream(cleanedMessage.toByteArray(Charsets.UTF_8))),
-                JcaKeyFingerprintCalculator()
-            )
+            val objectFactory = try {
+                PGPObjectFactory(
+                    PGPUtil.getDecoderStream(ByteArrayInputStream(cleanedMessage.toByteArray(Charsets.UTF_8))),
+                    JcaKeyFingerprintCalculator()
+                )
+            } catch (e: Exception) {
+                android.util.Log.e("PGPEncryptionHelper", "Failed to create PGP object factory: ${e.message}", e)
+                android.util.Log.e("PGPEncryptionHelper", "Cleaned message preview: ${cleanedMessage.take(200)}")
+                throw Exception("创建PGP对象工厂失败: ${e.message}")
+            }
+            android.util.Log.d("PGPEncryptionHelper", "Created PGP object factory for encrypted message")
 
             var encryptedDataList: PGPEncryptedDataList? = null
-            var obj = objectFactory.nextObject()
-            while (obj != null) {
-                if (obj is PGPEncryptedDataList) {
-                    encryptedDataList = obj
-                    break
-                }
+            var obj: Any? = null
+            var objCount = 0
+            try {
                 obj = objectFactory.nextObject()
+                while (obj != null) {
+                    objCount++
+                    android.util.Log.d("PGPEncryptionHelper", "Object $objCount: ${obj.javaClass.simpleName}")
+                    if (obj is PGPEncryptedDataList) {
+                        encryptedDataList = obj
+                        android.util.Log.d("PGPEncryptionHelper", "Found PGPEncryptedDataList")
+                        break
+                    }
+                    obj = try {
+                        objectFactory.nextObject()
+                    } catch (e: Exception) {
+                        android.util.Log.e("PGPEncryptionHelper", "Error getting next object: ${e.message}", e)
+                        break
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("PGPEncryptionHelper", "Error iterating objects: ${e.message}", e)
+                throw Exception("解析加密消息对象失败: ${e.message}")
             }
 
-            encryptedDataList ?: throw Exception("无效的加密数据格式")
+            encryptedDataList ?: throw Exception("无效的加密数据格式：未找到PGPEncryptedDataList（已检查 $objCount 个对象）")
 
-            // 查找匹配的私钥 - 简化版本，尝试所有密钥
+            // 查找匹配的私钥
             var secretKey: PGPSecretKey? = null
             var encryptedData: PGPEncryptedData? = null
+            var publicKeyEncryptedData: org.bouncycastle.openpgp.PGPPublicKeyEncryptedData? = null
 
             // 获取第一个加密数据项
             val encryptedDataObjects = encryptedDataList.encryptedDataObjects
             if (encryptedDataObjects.hasNext()) {
                 encryptedData = encryptedDataObjects.next() as PGPEncryptedData
+                // 转换为PGPPublicKeyEncryptedData以获取keyID
+                publicKeyEncryptedData = encryptedData as? org.bouncycastle.openpgp.PGPPublicKeyEncryptedData
+                if (publicKeyEncryptedData != null) {
+                    android.util.Log.d("PGPEncryptionHelper", "Found encrypted data, keyID: ${publicKeyEncryptedData.keyID}")
+                } else {
+                    android.util.Log.w("PGPEncryptionHelper", "Encrypted data is not PGPPublicKeyEncryptedData")
+                }
             }
 
             encryptedData ?: throw Exception("未找到加密数据")
 
-            // 尝试所有私钥
+            // 尝试所有私钥，匹配加密数据中的keyID
             val keyRings = secretKeyRingCollection.keyRings
+            var keyRingCount = 0
+            var secretKeyCount = 0
+            val targetKeyID = publicKeyEncryptedData?.keyID
+            
             while (keyRings.hasNext() && secretKey == null) {
-                val keyRing = keyRings.next() as PGPSecretKeyRing
-                val secretKeys = keyRing.secretKeys
-                while (secretKeys.hasNext() && secretKey == null) {
-                    secretKey = secretKeys.next() as PGPSecretKey
+                keyRingCount++
+                try {
+                    val keyRing = keyRings.next() as PGPSecretKeyRing
+                    val secretKeys = keyRing.secretKeys
+                    while (secretKeys.hasNext() && secretKey == null) {
+                        secretKeyCount++
+                        val candidateKey = secretKeys.next() as PGPSecretKey
+                        val candidateKeyID = candidateKey.keyID
+                        
+                        if (targetKeyID != null) {
+                            android.util.Log.d("PGPEncryptionHelper", "Comparing keyID: candidate=$candidateKeyID, encrypted=$targetKeyID")
+                            // 尝试匹配keyID
+                            if (candidateKeyID == targetKeyID) {
+                                secretKey = candidateKey
+                                android.util.Log.d("PGPEncryptionHelper", "Found matching secret key: keyID=$candidateKeyID")
+                                break
+                            }
+                        } else {
+                            // 如果没有keyID，尝试第一个密钥（向后兼容）
+                            android.util.Log.d("PGPEncryptionHelper", "No target keyID, trying first key: $candidateKeyID")
+                            secretKey = candidateKey
+                            break
+                        }
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.w("PGPEncryptionHelper", "Error processing keyring: ${e.message}")
                 }
             }
+            
+            android.util.Log.d("PGPEncryptionHelper", "Processed $keyRingCount keyrings, $secretKeyCount secret keys")
 
-            secretKey ?: throw Exception("未找到匹配的私钥")
+            secretKey ?: throw Exception("未找到匹配的私钥${if (targetKeyID != null) "（加密消息的keyID: $targetKeyID" else ""}，已检查 $secretKeyCount 个密钥）")
 
             // 提取私钥（支持密码保护）
+            android.util.Log.d("PGPEncryptionHelper", "Extracting private key, has password: ${password != null && password.isNotEmpty()}")
             val passwordChars = password?.toCharArray() ?: "".toCharArray()
             val privateKey = try {
+                // 不指定提供者，让系统自动选择（Android P+兼容）
+                // 系统会自动使用可用的提供者，避免BC提供者的限制
                 secretKey.extractPrivateKey(
                     org.bouncycastle.openpgp.operator.jcajce.JcePBESecretKeyDecryptorBuilder()
-                        .setProvider("BC")
+                        .setProvider("AndroidOpenSSL")
                         .build(passwordChars)
-                )
-            } catch (e: Exception) {
-                // 如果密码错误，尝试空密码（向后兼容）
-                if (password != null && password.isNotEmpty()) {
-                    throw Exception("私钥密码错误或私钥未加密")
+                ).also {
+                    android.util.Log.d("PGPEncryptionHelper", "Successfully extracted private key using AndroidOpenSSL")
                 }
-                secretKey.extractPrivateKey(
-                    org.bouncycastle.openpgp.operator.jcajce.JcePBESecretKeyDecryptorBuilder()
-                        .setProvider("BC")
-                        .build("".toCharArray())
-                )
+            } catch (e: Exception) {
+                android.util.Log.w("PGPEncryptionHelper", "Failed with AndroidOpenSSL: ${e.message}, trying system default")
+                try {
+                    // 尝试不指定提供者，使用系统默认
+                    secretKey.extractPrivateKey(
+                        org.bouncycastle.openpgp.operator.jcajce.JcePBESecretKeyDecryptorBuilder()
+                            // 不设置提供者，让系统自动选择
+                            .build(passwordChars)
+                    ).also {
+                        android.util.Log.d("PGPEncryptionHelper", "Successfully extracted private key using system default provider")
+                    }
+                } catch (e2: Exception) {
+                    android.util.Log.e("PGPEncryptionHelper", "Failed to extract private key: ${e2.message}", e2)
+                    // 如果密码错误，尝试空密码（向后兼容）
+                    if (password != null && password.isNotEmpty()) {
+                        android.util.Log.d("PGPEncryptionHelper", "Trying with empty password")
+                        try {
+                            secretKey.extractPrivateKey(
+                                org.bouncycastle.openpgp.operator.jcajce.JcePBESecretKeyDecryptorBuilder()
+                                    .setProvider("AndroidOpenSSL")
+                                    .build("".toCharArray())
+                            ).also {
+                                android.util.Log.d("PGPEncryptionHelper", "Extracted with empty password using AndroidOpenSSL")
+                            }
+                        } catch (e3: Exception) {
+                            android.util.Log.w("PGPEncryptionHelper", "Failed with empty password and AndroidOpenSSL: ${e3.message}, trying system default")
+                            secretKey.extractPrivateKey(
+                                org.bouncycastle.openpgp.operator.jcajce.JcePBESecretKeyDecryptorBuilder()
+                                    // 不设置提供者
+                                    .build("".toCharArray())
+                            ).also {
+                                android.util.Log.d("PGPEncryptionHelper", "Extracted with empty password using system default")
+                            }
+                        }
+                    } else {
+                        throw Exception("私钥密码错误或私钥未加密: ${e2.message}")
+                    }
+                }
             }
 
             // 创建解密器
-            val dataDecryptorFactory = org.bouncycastle.openpgp.operator.jcajce.JcePublicKeyDataDecryptorFactoryBuilder()
-                .setProvider("BC")
-                .build(privateKey)
+            android.util.Log.d("PGPEncryptionHelper", "Creating data decryptor factory")
+            val dataDecryptorFactory = try {
+                // 首先尝试AndroidOpenSSL
+                org.bouncycastle.openpgp.operator.jcajce.JcePublicKeyDataDecryptorFactoryBuilder()
+                    .setProvider("AndroidOpenSSL")
+                    .build(privateKey)
+            } catch (e: Exception) {
+                android.util.Log.w("PGPEncryptionHelper", "Failed with AndroidOpenSSL, trying system default: ${e.message}")
+                try {
+                    // 尝试系统默认提供者
+                    org.bouncycastle.openpgp.operator.jcajce.JcePublicKeyDataDecryptorFactoryBuilder()
+                        // 不设置提供者，让系统自动选择
+                        .build(privateKey)
+                } catch (e2: Exception) {
+                    android.util.Log.w("PGPEncryptionHelper", "Failed with system default, trying BC: ${e2.message}")
+                    // 最后尝试BC（可能在某些设备上可用）
+                    org.bouncycastle.openpgp.operator.jcajce.JcePublicKeyDataDecryptorFactoryBuilder()
+                        .setProvider("BC")
+                        .build(privateKey)
+                }
+            }
+            android.util.Log.d("PGPEncryptionHelper", "Created data decryptor factory")
 
             // 解密数据 - 使用PGPPublicKeyEncryptedData
-            val publicKeyEncryptedData = encryptedData as? org.bouncycastle.openpgp.PGPPublicKeyEncryptedData
-                ?: throw Exception("不支持的加密数据类型")
+            val publicKeyEncryptedDataForDecrypt = publicKeyEncryptedData
+                ?: (encryptedData as? org.bouncycastle.openpgp.PGPPublicKeyEncryptedData)
+                ?: throw Exception("不支持的加密数据类型：期望PGPPublicKeyEncryptedData，实际: ${encryptedData.javaClass.name}")
             
-            val decryptedStream = publicKeyEncryptedData.getDataStream(dataDecryptorFactory)
+            android.util.Log.d("PGPEncryptionHelper", "Getting decrypted data stream")
+            val decryptedStream = try {
+                publicKeyEncryptedDataForDecrypt.getDataStream(dataDecryptorFactory)
+            } catch (e: Exception) {
+                android.util.Log.e("PGPEncryptionHelper", "Failed to get decrypted stream: ${e.message}", e)
+                throw Exception("解密失败：无法获取解密流。可能是私钥不匹配或密码错误: ${e.message}")
+            }
+            android.util.Log.d("PGPEncryptionHelper", "Got decrypted stream")
 
             val decryptedFactory = PGPObjectFactory(decryptedStream, JcaKeyFingerprintCalculator())
             var decryptedObj: Any? = decryptedFactory.nextObject()
+            android.util.Log.d("PGPEncryptionHelper", "Decrypted object type: ${decryptedObj?.javaClass?.simpleName}")
 
             // 处理压缩数据
             if (decryptedObj is PGPCompressedData) {
+                android.util.Log.d("PGPEncryptionHelper", "Decompressing data")
                 val compressedFactory = PGPObjectFactory(
                     decryptedObj.dataStream,
                     JcaKeyFingerprintCalculator()
                 )
                 decryptedObj = compressedFactory.nextObject()
+                android.util.Log.d("PGPEncryptionHelper", "Decompressed object type: ${decryptedObj?.javaClass?.simpleName}")
             }
 
             // 读取字面数据
             if (decryptedObj is PGPLiteralData) {
+                android.util.Log.d("PGPEncryptionHelper", "Reading literal data")
                 val inputStream = decryptedObj.inputStream
                 val buffer = ByteArrayOutputStream()
                 inputStream.copyTo(buffer)
                 inputStream.close()
                 decryptedStream.close()
 
-                return String(buffer.toByteArray(), Charsets.UTF_8)
+                val result = String(buffer.toByteArray(), Charsets.UTF_8)
+                android.util.Log.d("PGPEncryptionHelper", "Decryption successful, result length: ${result.length}")
+                return result
             } else {
-                throw Exception("无效的消息格式")
+                android.util.Log.e("PGPEncryptionHelper", "Unexpected decrypted object type: ${decryptedObj?.javaClass?.name}")
+                throw Exception("无效的消息格式：期望PGPLiteralData，实际: ${decryptedObj?.javaClass?.name}")
             }
         } catch (e: Exception) {
+            android.util.Log.e("PGPEncryptionHelper", "Decryption failed: ${e.message}", e)
+            e.printStackTrace()
             throw Exception("解密失败: ${e.message}", e)
         }
     }
