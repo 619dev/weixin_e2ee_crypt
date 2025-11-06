@@ -20,6 +20,8 @@ object PGPEncryptionHelper {
         if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
             Security.addProvider(BouncyCastleProvider())
         }
+        // 记录可用的提供者
+        android.util.Log.d("PGPEncryptionHelper", "Available providers: ${Security.getProviders().joinToString(", ") { it.name }}")
     }
 
     /**
@@ -510,51 +512,83 @@ object PGPEncryptionHelper {
             android.util.Log.d("PGPEncryptionHelper", "Extracting private key, has password: ${password != null && password.isNotEmpty()}")
             val passwordChars = password?.toCharArray() ?: "".toCharArray()
             val privateKey = try {
-                // 不指定提供者，让系统自动选择（Android P+兼容）
-                // 系统会自动使用可用的提供者，避免BC提供者的限制
+                // 尝试使用BC提供者（虽然Android P+有限制，但某些操作可能仍可用）
                 secretKey.extractPrivateKey(
                     org.bouncycastle.openpgp.operator.jcajce.JcePBESecretKeyDecryptorBuilder()
-                        .setProvider("AndroidOpenSSL")
+                        .setProvider("BC")
                         .build(passwordChars)
                 ).also {
-                    android.util.Log.d("PGPEncryptionHelper", "Successfully extracted private key using AndroidOpenSSL")
+                    android.util.Log.d("PGPEncryptionHelper", "Successfully extracted private key using BC provider")
                 }
             } catch (e: Exception) {
-                android.util.Log.w("PGPEncryptionHelper", "Failed with AndroidOpenSSL: ${e.message}, trying system default")
+                android.util.Log.w("PGPEncryptionHelper", "Failed with BC: ${e.message}, trying AndroidOpenSSL")
                 try {
-                    // 尝试不指定提供者，使用系统默认
+                    // 尝试AndroidOpenSSL
                     secretKey.extractPrivateKey(
                         org.bouncycastle.openpgp.operator.jcajce.JcePBESecretKeyDecryptorBuilder()
-                            // 不设置提供者，让系统自动选择
+                            .setProvider("AndroidOpenSSL")
                             .build(passwordChars)
                     ).also {
-                        android.util.Log.d("PGPEncryptionHelper", "Successfully extracted private key using system default provider")
+                        android.util.Log.d("PGPEncryptionHelper", "Successfully extracted private key using AndroidOpenSSL")
                     }
                 } catch (e2: Exception) {
-                    android.util.Log.e("PGPEncryptionHelper", "Failed to extract private key: ${e2.message}", e2)
-                    // 如果密码错误，尝试空密码（向后兼容）
-                    if (password != null && password.isNotEmpty()) {
-                        android.util.Log.d("PGPEncryptionHelper", "Trying with empty password")
-                        try {
-                            secretKey.extractPrivateKey(
-                                org.bouncycastle.openpgp.operator.jcajce.JcePBESecretKeyDecryptorBuilder()
-                                    .setProvider("AndroidOpenSSL")
-                                    .build("".toCharArray())
-                            ).also {
-                                android.util.Log.d("PGPEncryptionHelper", "Extracted with empty password using AndroidOpenSSL")
+                    android.util.Log.w("PGPEncryptionHelper", "Failed with AndroidOpenSSL: ${e2.message}, trying system default")
+                    try {
+                        // 尝试不指定提供者，使用系统默认
+                        secretKey.extractPrivateKey(
+                            org.bouncycastle.openpgp.operator.jcajce.JcePBESecretKeyDecryptorBuilder()
+                                // 不设置提供者，让系统自动选择
+                                .build(passwordChars)
+                        ).also {
+                            android.util.Log.d("PGPEncryptionHelper", "Successfully extracted private key using system default provider")
+                        }
+                    } catch (e3: Exception) {
+                        android.util.Log.e("PGPEncryptionHelper", "Failed to extract private key with password: ${e3.message}", e3)
+                        // 检查是否是密码错误（checksum mismatch 通常表示密码错误）
+                        val isPasswordError = e3.message?.contains("checksum") == true || 
+                                             e3.message?.contains("mismatch") == true ||
+                                             e3.message?.contains("wrong") == true
+                        
+                        // 如果密码错误，尝试空密码（向后兼容）
+                        if (password != null && password.isNotEmpty() && isPasswordError) {
+                            android.util.Log.d("PGPEncryptionHelper", "Checksum mismatch detected, trying with empty password (password may be incorrect)")
+                            try {
+                                secretKey.extractPrivateKey(
+                                    org.bouncycastle.openpgp.operator.jcajce.JcePBESecretKeyDecryptorBuilder()
+                                        .setProvider("BC")
+                                        .build("".toCharArray())
+                                ).also {
+                                    android.util.Log.d("PGPEncryptionHelper", "Extracted with empty password using BC")
+                                }
+                            } catch (e4: Exception) {
+                                android.util.Log.w("PGPEncryptionHelper", "Failed with empty password and BC: ${e4.message}, trying AndroidOpenSSL")
+                                try {
+                                    secretKey.extractPrivateKey(
+                                        org.bouncycastle.openpgp.operator.jcajce.JcePBESecretKeyDecryptorBuilder()
+                                            .setProvider("AndroidOpenSSL")
+                                            .build("".toCharArray())
+                                    ).also {
+                                        android.util.Log.d("PGPEncryptionHelper", "Extracted with empty password using AndroidOpenSSL")
+                                    }
+                                } catch (e5: Exception) {
+                                    android.util.Log.w("PGPEncryptionHelper", "Failed with empty password and AndroidOpenSSL: ${e5.message}, trying system default")
+                                    secretKey.extractPrivateKey(
+                                        org.bouncycastle.openpgp.operator.jcajce.JcePBESecretKeyDecryptorBuilder()
+                                            // 不设置提供者
+                                            .build("".toCharArray())
+                                    ).also {
+                                        android.util.Log.d("PGPEncryptionHelper", "Extracted with empty password using system default")
+                                    }
+                                }
                             }
-                        } catch (e3: Exception) {
-                            android.util.Log.w("PGPEncryptionHelper", "Failed with empty password and AndroidOpenSSL: ${e3.message}, trying system default")
-                            secretKey.extractPrivateKey(
-                                org.bouncycastle.openpgp.operator.jcajce.JcePBESecretKeyDecryptorBuilder()
-                                    // 不设置提供者
-                                    .build("".toCharArray())
-                            ).also {
-                                android.util.Log.d("PGPEncryptionHelper", "Extracted with empty password using system default")
+                        } else {
+                            // 如果是密码错误，提供更明确的错误信息
+                            if (isPasswordError) {
+                                throw Exception("私钥密码错误，请检查输入的密码是否正确")
+                            } else {
+                                throw Exception("私钥密码错误或私钥未加密。错误信息: ${e3.message}")
                             }
                         }
-                    } else {
-                        throw Exception("私钥密码错误或私钥未加密: ${e2.message}")
                     }
                 }
             }
