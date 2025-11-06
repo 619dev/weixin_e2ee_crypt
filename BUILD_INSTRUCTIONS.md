@@ -152,63 +152,28 @@ Could not resolve: org.bouncycastle:bcpg-jdk15on
 
 ## 调试技巧
 
-### 查看详细日志
+### 查看日志
 
 ```bash
-# Flutter日志
-flutter run --verbose
-
 # Android日志
 adb logcat | grep PGPEncryptionHelper
-adb logcat | grep Flutter
 ```
 
-### 清理构建缓存
+### 清理构建
 
 ```bash
-# 清理Flutter构建
 flutter clean
-
-# 清理Gradle缓存
-cd android
-./gradlew clean
-cd ..
-
-# 清理所有
-rm -rf build/
-rm -rf android/.gradle/
-rm -rf android/app/build/
-```
-
-### 检查依赖
-
-```bash
-# 检查Flutter依赖
-flutter pub outdated
-
-# 检查Android依赖
-cd android
-./gradlew dependencies
+flutter pub get
 ```
 
 ## 性能优化
 
 ### 减小APK大小
 
-1. **启用代码混淆**（已配置）
-2. **启用资源压缩**（已配置）
-3. **使用Split APKs**（可选）
-
 ```bash
 # 构建Split APKs（按ABI）
 flutter build apk --split-per-abi
 ```
-
-### 构建时间优化
-
-1. **启用Gradle缓存**
-2. **使用Gradle Daemon**
-3. **配置代理加速下载**
 
 ## 签名配置（可选）
 
@@ -253,29 +218,10 @@ adb install -r build/app/outputs/flutter-apk/app-release.apk
 
 ## 环境变量（可选）
 
-可以设置以下环境变量加速构建：
-
 ```bash
-# Gradle JVM参数
-export GRADLE_OPTS="-Xmx2048m -XX:MaxPermSize=512m"
-
-# Android SDK路径
 export ANDROID_HOME=$HOME/Library/Android/sdk
 export PATH=$PATH:$ANDROID_HOME/tools:$ANDROID_HOME/platform-tools
 ```
-
-## 故障排除检查清单
-
-- [ ] Flutter SDK版本正确（3.0+）
-- [ ] Java版本正确（11+）
-- [ ] Android SDK已安装并配置
-- [ ] 网络连接正常（可以访问Maven仓库）
-- [ ] 已运行 `flutter pub get`
-- [ ] 已运行 `flutter clean`（如果遇到奇怪错误）
-- [ ] Gradle版本兼容（8.11.1+）
-- [ ] Android Gradle Plugin版本正确（8.9.1）
-- [ ] Kotlin版本正确（2.1.0）
-- [ ] 所有依赖都已下载
 
 ## 获取帮助
 
